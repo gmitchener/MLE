@@ -1,82 +1,101 @@
+from ast import In
+from re import A
 import kfp
 import kfp.dsl as dsl
 from kfp.v2.dsl import (component,Input,Output,Dataset,Metrics,pipeline,Artifact)
 
-@component(packages_to_install=['pandas', 'sklearn'])
-def preprocessing(df_artifact: Input[Artifact], df_processed_artifact: Output[Artifact])->None:
+
+@component(packages_to_install=['pandas'])
+def column_cleaning(df_artifact: Input[Artifact], cols_to_drop_string: str, df_cleaned_artifact: Output[Artifact])->None:
     import pandas as pd 
+    import json 
+
+    df = pd.read_csv(df_artifact.path)
+    cols_to_drop = json.loads(cols_to_drop_string)
+
+    df = df.drop(cols_to_drop, axis=1)
+
+    df.to_csv(df_cleaned_artifact.path)
+
+
+@component(packages_to_install=['pandas', 'sklearn'])
+def onehot_encoding(df_artifact: Input[Artifact], col_to_encode_string: str, df_encoded_artifact: Output[Artifact])->None:
+    import pandas as pd 
+    import json
     import sklearn
-    from sklearn.preprocessing import LabelEncoder, OneHotEncoder, RobustScaler
-    le = LabelEncoder()
+    from sklearn.preprocessing import OneHotEncoder
     ohe = OneHotEncoder()
+
+    df = pd.read_csv(df_artifact.path)
+    col_to_encode = json.loads(col_to_encode_string)
+
+    results = ohe.fit_transform(df[col_to_encode].values.reshape(-1,1)).toarray()
+
+    feature_names = [string.split('_')[1] for string in ohe.get_feature_names()]
+    df[feature_names] = pd.DataFrame(result, index=df.index)
+
+    least_common = df[col_to_encode].value_counts().index[-1]
+    df.drop([col_to_encode, least_common], axis=1)
+
+    df.to_csv(df_encoded_artifact.path)
+
+
+@component(packages_to_install=['pandas'])
+def numerical_imputation_by_group(df_artifact: Input[Artifact], col_to_imput_string: str, cols_to_group_by_string: str, df_imputed_artifact: Output[Artifact])->None:
+    import pandas as pd
+    import json 
+
+    df = pd.read_csv(df_artifact.path)
+    col_to_imput = json.loads(col_to_imput_string)
+    cols_to_group_by = json.loads(cols_to_group_by_string)
+
+    df[col_to_imput] = df.groupby(cols_to_group_by)[col_to_imput].apply(lambda x: fillna(x.meadian()))
+
+    df.to_csv(df_imputed_artifact.path)
+
+
+@component(packages_to_install=['pandas', 'sklearn'])
+def categorical_imputation_most_common(df_artifact: Input[Artifact], col_to_imput_string: str, df_imputed_artifact: Output[Artifact])->None:
+    import pandas as pd 
+    import json 
+
+    df = pd.read_csv(df_artifact.path)
+    col_to_imput = json.loads(col_to_imput_string)
+
+    most_common = df[col_to_imput].mode()[0]
+    df[col_to_imput].fillna(most_common)
+
+    df.to_csv(df_imputed_artifact.path)
+
+
+@component(packages_to_install=['pandas', 'sklearn'])
+def robust_scaling(df_artifact: Input[Artifact], col_to_scale_string: str, df_scaled_artifact: Output[Artifact])->None:
+    import pandas as pd 
+    import json 
+    import sklearn
+    from sklearn.preprocessing import RobustScaler
     scaler = RobustScaler()
 
     df = pd.read_csv(df_artifact.path)
+    col_to_scale = json.loads(col_to_scale_string)
 
-    def drop_cols(df, cols_to_drop):
-        df = df.drop(cols_to_drop, axis=1)
-        return df
+    df[col_to_scale] = scaler.fit_transform(train_df[col_to_scale].values.reshape(-1,1))
 
-    def encode_sex(df):
-        df['Male'] = le.fit_transform(df.Sex)
-        df = df.drop(['Sex'], axis=1)
-        return df
+    df.to_csv(df_scaled_artifact.path)
 
-    def imputation_by_group(df, column_to_impute, columns_to_group_by):
-        """Impute the column_to_impute by taking the median group on columns_to_group_by"""
-        df[column_to_impute] = df.groupby(columns_to_group_by)[column_to_impute].apply(lambda x: x.fillna(x.median()))
-        return df 
 
-    def fill_categorical_most_common(df, column_to_fill):
-        """Fill nulls in categorical column_to_fill with the most common variable"""
-        most_common = df[column_to_fill].mode()[0]
-        df[column_to_fill].fillna(most_common)
-        return df
+@component(packages_to_install=['pandas'])
+def binary_binning(df_artifact: Input[Artifact], col_to_bin_string: str, df_binned_artifact: Output[Artifact])->None:
+    import pandas as pd 
+    import json
 
-    def one_hot_encoding(df, col_to_encode):
-        """One hot encodes categorical variable col_to_encode and drops the least common column"""
-        result = ohe.fit_transform(df[col_to_encode].values.reshape(-1,1)).toarray()
+    df = pd.read_csv(df_artifact.path)
+    col_to_bin = json.loads(col_to_bin_string)
 
-        feature_names = ohe.get_feature_names().tolist()
-        df[feature_names] = pd.DataFrame(result, index=df.index)
+    correction = lambda x: 1 if x != 0 else 0
+    df[col_to_bin] = df[col_to_bin].apply(correction)
 
-        least_common = df[col_to_encode].value_counts().index[-1]
-        col_to_drop = 'x0_'+least_common
-        df = df.drop([col_to_encode, col_to_drop], axis=1)
-        return df 
-
-    def robust_scaling(df, col_to_scale):
-        df[col_to_scale] = scaler.fit_transform(train_df[col_to_scale].values.reshape(-1,1))
-        return df
-
-    def binary_binning(df, col_to_bin):
-        """Takes col_to_bin and creates binary count for 0 or 1+"""
-        correction = lambda x: 1 if x != 0 else 0
-        df[col_to_bin] = df[col_to_bin].apply(correction)
-        return df
-
-    non_informative_cols = ['PassengerId', 'Name', 'Ticket']
-    df = drop_cols(df, non_informative_cols)
-
-    mostly_null_cols = ['Cabin']
-    df = drop_cols(df, mostly_null_cols)
-
-    df = encode_sex(df)
-
-    df = imputation_by_group(df, 'Age', ['Pclass', 'Male'])
-    df = imputation_by_group(df, 'Fare', 'Pclass')
-
-    df = fill_categorical_most_common(df, 'Embarked')
-
-    df = one_hot_encoding(df, 'Embarked')
-
-    df = robust_scaling(df, 'Age')
-    df = robust_scaling(df, 'Fare')
-
-    df = binary_binning(df, 'SibSp')
-    df = binary_binning(df, 'Parch')
-
-    df.to_csv(df_processed_artifact.path) 
+    df.to_csv(df_binned_artifact.path)
 
 
 @component(packages_to_install=['pandas', 'sklearn'])
