@@ -1,5 +1,3 @@
-from ast import In
-from re import A
 import kfp
 import kfp.dsl as dsl
 from kfp.v2.dsl import (component,Input,Output,Dataset,Metrics,pipeline,Artifact)
@@ -98,50 +96,102 @@ def binary_binning(df_artifact: Input[Artifact], col_to_bin_string: str, df_binn
     df.to_csv(df_binned_artifact.path)
 
 
+@component(packages_to_install=['google-cloud-storage'])
+def download_gcs_file(project: str, bucket: str, filepath: str, output_file: Output[Artifact]) -> None:
+    '''Downloads a file from GCS to a KFP Artifact component'''
+    from google.cloud import storage
+
+    client = storage.Client(project=project)
+    bucket = client.get_bucket(bucket)
+    blob = bucket.blob(filepath)
+
+    blob.download_to_filename(output_file.path)
+
+
 @component(packages_to_install=['pandas', 'sklearn'])
-def train_model(df_processed_artifact: Input[Artifact], model_artifact: Output[Artifact])->None:
+def train_model(df_artifact: Input[Artifact], target_string: str, model_artifact: Output[Artifact])->None:
     import pandas as pd 
     import pickle
+    import json 
     from sklearn.linear_model import LogisticRegression
-    logreg = LogisticRegression()
+    model = LogisticRegression()
 
-    df = pd.read_csv(df_processed_artifact.path)
-    y = df.Survived
-    x = df.drop('Survived', axis=1)
+    df = pd.read_csv(df_artifact.path)
+    target = json.load(target_string)
+
+    y = df[target]
+    x = df.drop(target, axis=1)
     
-
-    logreg.fit(x,y)
-
-    pickle.dump(logreg, open(model_artifact.path, 'wb'))
+    model.fit(x,y)
+    pickle.dump(model, open(model_artifact.path, 'wb'))
 
 
 @component(packages_to_install=['pandas', 'sklearn'])
-def predict(model_artifact: Input[Artifact], x_test_artifact: Input[Artifact], y_pred_artifact: Output[Artifact])->None:
+def predict(model_artifact: Input[Artifact], df_artifact: Input[Artifact], target_string: str, y_pred_artifact: Output[Artifact])->None:
     import pandas as pd 
     import pickle 
+    import json
+
+    df = pd.read_csv(df_artifact.path)
+    target = json.load(target_string)
 
     model = pickle.load(open(model_artifact.path, 'rb'))
 
-    x_test = pd.read_csv(x_test_artifact.path)
-    y_pred = model.predict(x_test)
+    x = df.drop(target, axis=1)
+    y_pred = model.predict(x)
     y_pred.to_csv(y_pred_artifact.path)
 
 
 @component(packages_to_install=['pandas', 'sklearn'])
-def evaluate(y_test_artifact: Input[Artifact], y_pred_artifact: Input[Artifact])->float:
+def evaluate(df_artifact: Input[Artifact], target_string: str, y_pred_artifact: Input[Artifact])->float:
     import pandas as pd
+    import json
     import sklearn 
     from sklearn.metrics import accuracy_score
 
-    y_test = pd.read_csv(y_test_artifact.path)
+    df = pd.read_csv(df_artifact.path)
+    target = json.load(target_string)
+
+    y = df[target]
     y_pred = pd.read_csv(y_pred_artifact.path)
 
     accuracy = accuracy_score(y_test, y_pred)
     return accuracy
 
+
 @pipeline(name='titanic_pipleine', description='dummy pipeline on titanic dataset')
-def build_pipeline():
-    preprocessing_op = preprocessing(df)
-    train_model_op = train_model(preprocessing_op.output)
-    predict_op = predict(train_model_op.output, x_test)
-    evaluate_op = evaluate(y_test, predict_op.output)
+def build_pipeline(
+    cols_to_drop_string: str, 
+    sex_string: str, 
+    age_string: str,
+    age_group_by_cols_string: str,
+    fare_string: str,
+    fare_group_by_cols_string: str,
+    embarked_string: str,
+    sibsp_string: str,
+    parch_string: str,
+    model_artifact: Input[Artifact], 
+    target_string: str
+    ):
+
+
+    download_gcs_file_op = download_gcs_file()
+
+    column_cleaning_op = column_cleaning(download_gcs_file_op.output, cols_to_drop_string)
+
+    onehot_encoding_sex_op = onehot_encoding(column_cleaning_op.output, sex_string)
+    
+    numerical_imputation_by_group_age_op = numerical_imputation_by_group(onehot_encoding_sex_op.output, age_string, age_group_by_cols_string)
+    numerical_imputation_by_group_fare_op = numerical_imputation_by_group(numerical_imputation_by_group_age_op.output, fare_string, fare_group_by_cols_string)
+
+    onehot_encoding_embarked_op = onehot_encoding(numerical_imputation_by_group_fare_op.output, embarked_string)
+
+    robust_scaling_age_op = robust_scaling(onehot_encoding_embarked_op.output, age_string)
+    robust_scaling_fare_op = robust_scaling(robust_scaling_age_op.output, fare_string)
+
+    binary_binning_sibsp_op = binary_binning(robust_scaling_fare_op, sibsp_string)
+    binary_binning_parch_op = binary_binning(binary_binning_sibsp_op, parch_string)
+
+    predict_op = predict(model_artifact, binary_binning_parch_op.output, target_string)
+
+    evaluate_op = evaluate(binary_binning_parch_op.output, target_string, predict_op.output)
