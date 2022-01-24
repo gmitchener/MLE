@@ -1,3 +1,4 @@
+from re import A
 import kfp
 import kfp.dsl as dsl
 from kfp.v2.dsl import (component,Input,Output,Dataset,Metrics,pipeline,Artifact)
@@ -143,7 +144,7 @@ def predict(model_artifact: Input[Artifact], df_artifact: Input[Artifact], targe
 
 
 @component(packages_to_install=['pandas', 'sklearn'])
-def evaluate(df_artifact: Input[Artifact], target_string: str, y_pred_artifact: Input[Artifact])->float:
+def evaluate(df_artifact: Input[Artifact], target_string: str, y_pred_artifact: Input[Artifact], accuracy_artifact: Output[Artifact])->None:
     import pandas as pd
     import json
     import sklearn 
@@ -155,12 +156,16 @@ def evaluate(df_artifact: Input[Artifact], target_string: str, y_pred_artifact: 
     y = df[target]
     y_pred = pd.read_csv(y_pred_artifact.path)
 
-    accuracy = accuracy_score(y_test, y_pred)
-    return accuracy
+    accuracy = accuracy_score(y, y_pred)
+    df_accuracy = pd.DataFrame([accuracy], columns=['Accuracy']) 
+    df_accuracy.to_csv(accuracy_artifact.path)
 
 
 @pipeline(name='titanic_pipleine', description='dummy pipeline on titanic dataset')
 def build_pipeline(
+    data_project_string: str, 
+    data_bucket_string: str, 
+    data_filepath_string: str,
     cols_to_drop_string: str, 
     sex_string: str, 
     age_string: str,
@@ -170,14 +175,16 @@ def build_pipeline(
     embarked_string: str,
     sibsp_string: str,
     parch_string: str,
-    model_artifact: Input[Artifact], 
+    model_project_string: str, 
+    model_bucket_string: str,
+    model_filepath_str: str,
     target_string: str
-    ):
+    ): 
 
 
-    download_gcs_file_op = download_gcs_file()
+    download_gcs_file_data_op = download_gcs_file(data_project_string, data_bucket_string, data_filepath_string)
 
-    column_cleaning_op = column_cleaning(download_gcs_file_op.output, cols_to_drop_string)
+    column_cleaning_op = column_cleaning(download_gcs_file_data_op.output, cols_to_drop_string)
 
     onehot_encoding_sex_op = onehot_encoding(column_cleaning_op.output, sex_string)
     
@@ -192,6 +199,7 @@ def build_pipeline(
     binary_binning_sibsp_op = binary_binning(robust_scaling_fare_op, sibsp_string)
     binary_binning_parch_op = binary_binning(binary_binning_sibsp_op, parch_string)
 
-    predict_op = predict(model_artifact, binary_binning_parch_op.output, target_string)
+    download_gcs_file_model_op = download_gcs_file(model_project_string, model_bucket_string, model_filepath_str)
+    predict_op = predict(download_gcs_file_model_op.output, binary_binning_parch_op.output, target_string)
 
-    evaluate_op = evaluate(binary_binning_parch_op.output, target_string, predict_op.output)
+    evaluate_op = evaluate(binary_binning_parch_op.output, target_string, predict_op.output) 
